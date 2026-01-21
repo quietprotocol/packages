@@ -430,7 +430,7 @@ function resetUci() {
 
 	for (const iface of uci.sections('wireless', 'wifi-iface')) {
 		if (knownInterfaces.has(iface['.name'])) {
-			whitelistFields('wireless', iface, ['network', 'device', 'key', 'encryption', 'mode', 'ssid', 'mesh_id']);
+			whitelistFields('wireless', iface, ['network', 'device', 'key', 'encryption', 'mode', 'ssid', 'mesh_id', 'ifname']);
 		}
 
 		// Set all interfaces to disabled. This has to occur after white-listing,

@@ -151,7 +151,13 @@ return wizard.AbstractWizardView.extend({
 		}
 
 		uci.set('wireless', morseInterfaceName, 'mode', 'mesh');
+		uci.set('wireless', morseInterfaceName, 'ifname', 'halow-mesh0');
 		uci.set('wireless', morseInterfaceName, 'encryption', 'sae');
+		if (!uci.get('network', 'halow_mesh0')) {
+			uci.add('network', 'device', 'halow_mesh0');
+		}
+		uci.set('network', 'halow_mesh0', 'name', 'halow-mesh0');
+		uci.set('network', 'halow_mesh0', 'mtu', '1532');
 		uci.set('wireless', morseInterfaceName, 'beacon_int', '1000');
 		uci.set('wireless', morseDeviceName, 'enable_mcast_whitelist', '0');
 		uci.set('wireless', morseDeviceName, 'enable_mcast_rate_control', '1');
