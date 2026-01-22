@@ -480,6 +480,7 @@ function setupBatmanInterfaceOnDevice(deviceName = 'bat0') {
 	uci.add('network', 'interface', defaultBatmanIfaceName);
 	uci.set('network', defaultBatmanIfaceName, 'proto', 'batadv_hardif');
 	uci.set('network', defaultBatmanIfaceName, 'master', deviceName);
+	uci.set('network', defaultBatmanIfaceName, 'device', 'wlan0');
 
 	// Create secondary batman interface on the batman device for 2.4ghz wifi
 	// Don't create if it already exists
