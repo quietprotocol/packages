@@ -1,12 +1,39 @@
 'use strict';
 
-/* globals form morseuci morseui uci widgets wizard */
+/* globals form morseuci morseui network rpc uci widgets wizard */
 'require form';
 'require uci';
+'require network';
+'require rpc';
 'require tools.widgets as widgets';
 'require tools.morse.wizard as wizard';
 'require tools.morse.morseui as morseui';
 'require tools.morse.uci as morseuci';
+
+const callIwinfoInfo = rpc.declare({
+	object: 'iwinfo',
+	method: 'info',
+	params: ['device'],
+	expect: { '': {} },
+});
+
+function looksLikeMeshCapableRadio(wifiDevice, iwinfo) {
+	const infoText = JSON.stringify(iwinfo ?? {}).toLowerCase();
+	const raw = `${wifiDevice.path ?? ''} ${wifiDevice.htmode ?? ''} ${wifiDevice.hwmode ?? ''} ${wifiDevice.band ?? ''}`.toLowerCase();
+
+	// Prefer strong positive hardware hints for the common Wi-Fi-only mesh cards.
+	if (/mt7915|mt7916/.test(infoText) || /mt7915|mt7916/.test(raw)) {
+		return true;
+	}
+
+	// HE modes are a practical hint for newer mac80211 radios where mesh is expected.
+	if ((wifiDevice.htmode ?? '').toUpperCase().startsWith('HE')) {
+		return true;
+	}
+
+	// Fallback to broader capability hint from iwinfo if available.
+	return /\bax\b/.test(infoText);
+}
 
 return wizard.AbstractWizardView.extend({
 	__init__(/* ... */) {
@@ -142,12 +169,27 @@ return wizard.AbstractWizardView.extend({
 
 		const wifiApsEnabled = {};
 		for (const wifiDevice of wifiDevices) {
+			const radioRole = uci.get('network', 'wizard', `wifi_role_${wifiDevice.name}`) || 'ap';
+			const meshSelected = radioRole === 'mesh' && this.wifiMeshCapabilities?.[wifiDevice.name];
+
 			// Record whether each device has an enabled AP
-			wifiApsEnabled[wifiDevice.name] = uci.get('wireless', wifiDevice.apInterfaceName, 'disabled') !== '1';
+			wifiApsEnabled[wifiDevice.name] = !meshSelected && uci.get('wireless', wifiDevice.apInterfaceName, 'disabled') !== '1';
 
 			// We don't have an explicit option for this, but it's determined by uplink.
 			// And because uplink is a complex option that's not valid for clients and is resolved here...
-			uci.set('wireless', wifiDevice.staInterfaceName, 'disabled', uplink === `wifi-${wifiDevice.staInterfaceName}` ? '0' : '1');
+			uci.set('wireless', wifiDevice.staInterfaceName, 'disabled',
+				(!meshSelected && uplink === `wifi-${wifiDevice.staInterfaceName}`) ? '0' : '1');
+
+			if (meshSelected) {
+				// Reuse this radio's default AP iface as a non-HaLow mesh member.
+				uci.unset('wireless', wifiDevice.apInterfaceName, 'disabled');
+				uci.set('wireless', wifiDevice.apInterfaceName, 'mode', 'mesh');
+				uci.set('wireless', wifiDevice.apInterfaceName, 'network', 'batmesh1');
+				uci.set('wireless', wifiDevice.apInterfaceName, 'encryption', 'sae');
+				uci.unset('wireless', wifiDevice.apInterfaceName, 'wds');
+			} else {
+				uci.set('wireless', wifiDevice.apInterfaceName, 'mode', 'ap');
+			}
 		}
 
 		uci.set('wireless', morseInterfaceName, 'mode', 'mesh');
@@ -282,12 +324,45 @@ return wizard.AbstractWizardView.extend({
 		}
 	},
 
-	loadPages() {
+	async loadPages() {
 		// resetUci disables all wifi-ifaces, but we want to remember the state of these.
 		const {
 			wifiDevices,
 			morseMeshApInterfaceName,
 		} = wizard.readSectionInfo();
+
+		await network.flushCache(true);
+		const wifiNetworks = await network.getWifiNetworks();
+		const wifiNetworksBySection = wifiNetworks.reduce((acc, wifiNetwork) => ({
+			...acc,
+			[wifiNetwork.getName()]: wifiNetwork,
+		}), {});
+
+		const wifiMeshCapabilities = {};
+		const defaultWifiRoles = {};
+		const wizardUsed = uci.get('luci', 'wizard', 'used') === '1';
+
+		for (const wifiDevice of wifiDevices) {
+			const runtimeIfname = wifiNetworksBySection[wifiDevice.apInterfaceName]?.getIfname()
+				|| wifiNetworksBySection[wifiDevice.staInterfaceName]?.getIfname();
+			let iwinfo = null;
+			if (runtimeIfname) {
+				iwinfo = await callIwinfoInfo(runtimeIfname).catch(() => null);
+			}
+
+			const existingMode = uci.get('wireless', wifiDevice.apInterfaceName, 'mode');
+			wifiMeshCapabilities[wifiDevice.name] =
+				existingMode === 'mesh' || looksLikeMeshCapableRadio(wifiDevice, iwinfo);
+			if (existingMode === 'mesh') {
+				defaultWifiRoles[wifiDevice.name] = 'mesh';
+			} else {
+				defaultWifiRoles[wifiDevice.name] = (!wizardUsed && wifiMeshCapabilities[wifiDevice.name]) ? 'mesh' : 'ap';
+			}
+		}
+
+		this.wifiMeshCapabilities = wifiMeshCapabilities;
+		this.defaultWifiRoles = defaultWifiRoles;
+
 		const wifiApsEnabled = wifiDevices.reduce((acc, wifiDevice) => ({
 			...acc,
 			[wifiDevice.name]: uci.get('wireless', wifiDevice.apInterfaceName, 'disabled') !== '1',
@@ -295,10 +370,12 @@ return wizard.AbstractWizardView.extend({
 		return [
 			wifiApsEnabled,
 			uci.get('wireless', morseMeshApInterfaceName, 'disabled') === '1',
+			wifiMeshCapabilities,
+			defaultWifiRoles,
 		];
 	},
 
-	renderPages([wifiApsEnabled, morseMeshApDisabled]) {
+	renderPages([wifiApsEnabled, morseMeshApDisabled, wifiMeshCapabilities, defaultWifiRoles]) {
 		let page, option;
 
 		const map = this.map;
@@ -654,20 +731,50 @@ return wizard.AbstractWizardView.extend({
 		/*****************************************************************************/
 
 		for (const wifiDevice of wifiDevices) {
+			const roleOptionName = `wifi_role_${wifiDevice.name}`;
+			const meshIdOptionName = `mesh_id_${wifiDevice.name}`;
+			const meshKeyOptionName = `mesh_key_${wifiDevice.name}`;
+			const meshSupported = !!wifiMeshCapabilities?.[wifiDevice.name];
+
 			page = this.page(wifiApInterfaceSections[wifiDevice.name],
 				`${wifiDevice.getBandName()} Wi-Fi Access Point`,
-				`This HaLow device is also capable of ${wifiDevice.getBandName()} Wi-Fi.
-				If you enable a ${wifiDevice.getBandName()} Wi-Fi <b>Access Point</b>, you will be able to
-				connect ${wifiDevice.getBandName()} Wi-Fi clients to this device.`);
+				meshSupported
+					? `This ${wifiDevice.getBandName()} radio supports 802.11s mesh and is preselected as a <b>Mesh Point</b> for Wi-Fi-only mesh backhaul. You can switch it back to <b>Access Point</b> mode if preferred.`
+					: `This HaLow device is also capable of ${wifiDevice.getBandName()} Wi-Fi.
+					If you enable a ${wifiDevice.getBandName()} Wi-Fi <b>Access Point</b>, you will be able to
+					connect ${wifiDevice.getBandName()} Wi-Fi clients to this device.`);
 			page.enableDiagram({
 				extras: ['GATE_WIFI_INT_SELECT', 'GATE_WIFI_INT_SELECT_FILL',
 				         'POINT_WIFI_INT_SELECT', 'POINT_WIFI_INT_SELECT_FILL'],
 			});
 
+			if (meshSupported) {
+				option = page.option(form.ListValue, roleOptionName, _('Radio role'));
+				option.uciconfig = 'network';
+				option.ucisection = 'wizard';
+				option.ucioption = roleOptionName;
+				option.widget = 'radio';
+				option.orientation = 'vertical';
+				option.rmempty = false;
+				option.retain = true;
+				option.value('mesh', _('Mesh Point (preselected)'));
+				option.value('ap', _('Access Point'));
+				option.load = () => uci.get('network', 'wizard', roleOptionName) || defaultWifiRoles[wifiDevice.name] || 'ap';
+				option.write = (_sectionId, value) => uci.set('network', 'wizard', roleOptionName, value);
+				option.onchange = function () {
+					thisWizardView.onchangeOptionUpdateDiagram(this);
+				};
+			} else {
+				option = page.message(_('This radio does not advertise 802.11s mesh capability in this build, so it is configured as Access Point only.'), 'notice');
+			}
+
 			option = page.option(morseui.Slider, 'disabled', `Enable ${wifiDevice.getBandName()} Access Point`);
 			option.enabled = '0';
 			option.disabled = '1';
 			option.default = '0';
+			if (meshSupported) {
+				option.depends(`network.wizard.${roleOptionName}`, 'ap');
+			}
 			option.onchange = function () {
 				thisWizardView.onchangeOptionUpdateDiagram(this);
 			};
@@ -677,6 +784,9 @@ return wizard.AbstractWizardView.extend({
 			option.retain = true;
 			option.rmempty = false;
 			option.depends('disabled', '0');
+			if (meshSupported) {
+				option.depends(`network.wizard.${roleOptionName}`, 'ap');
+			}
 			option.onchange = function () {
 				thisWizardView.onchangeOptionUpdateDiagram(this);
 			};
@@ -687,12 +797,46 @@ return wizard.AbstractWizardView.extend({
 			option.retain = true;
 			option.rmempty = false;
 			option.depends('disabled', '0');
+			if (meshSupported) {
+				option.depends(`network.wizard.${roleOptionName}`, 'ap');
+			}
 
 			option = page.option(form.ListValue, 'encryption', _('Encryption'));
 			option.value('psk2', _('WPA2-PSK'));
 			option.value('sae-mixed', _('WPA2-PSK/WPA3-SAE Mixed Mode'));
 			option.value('sae', _('WPA3-SAE'));
 			option.depends('disabled', '0');
+			if (meshSupported) {
+				option.depends(`network.wizard.${roleOptionName}`, 'ap');
+			}
+
+			if (meshSupported) {
+				option = page.option(form.Value, meshIdOptionName, _('Mesh ID'));
+				option.uciconfig = 'wireless';
+				option.ucisection = wifiDevice.apInterfaceName;
+				option.ucioption = 'mesh_id';
+				option.datatype = 'maxlength(32)';
+				option.rmempty = false;
+				option.retain = true;
+				option.depends(`network.wizard.${roleOptionName}`, 'mesh');
+				option.load = sectionId => uci.get('wireless', sectionId, 'mesh_id') || morseuci.getDefaultSSID();
+				option.write = (sectionId, value) => uci.set('wireless', sectionId, 'mesh_id', value);
+				option.onchange = function () {
+					thisWizardView.onchangeOptionUpdateDiagram(this);
+				};
+
+				option = page.option(form.Value, meshKeyOptionName, _('Mesh Passphrase'));
+				option.uciconfig = 'wireless';
+				option.ucisection = wifiDevice.apInterfaceName;
+				option.ucioption = 'key';
+				option.datatype = 'wpakey';
+				option.password = true;
+				option.rmempty = false;
+				option.retain = true;
+				option.depends(`network.wizard.${roleOptionName}`, 'mesh');
+				option.load = sectionId => uci.get('wireless', sectionId, 'key') || morseuci.getDefaultWifiKey();
+				option.write = (sectionId, value) => uci.set('wireless', sectionId, 'key', value);
+			}
 		}
 
 		/*****************************************************************************/
@@ -714,6 +858,9 @@ return wizard.AbstractWizardView.extend({
 				Connect another device via <b>${wifiDevice.getBandName()} Wi-Fi</b> to use your new HaLow link.
 			`);
 			option.depends({ mode: 'sta', [`wireless.${wifiDevice.apInterfaceName}.disabled`]: '0' });
+			if (wifiMeshCapabilities?.[wifiDevice.name]) {
+				option.depends(`network.wizard.wifi_role_${wifiDevice.name}`, 'ap');
+			}
 		}
 
 		// AP steps
@@ -728,6 +875,9 @@ return wizard.AbstractWizardView.extend({
 				Connect ${wifiDevice.getBandName()} devices to your network.
 			`));
 			option.depends({ mode: 'ap', [`wireless.${wifiDevice.apInterfaceName}.disabled`]: '0' });
+			if (wifiMeshCapabilities?.[wifiDevice.name]) {
+				option.depends(`network.wizard.wifi_role_${wifiDevice.name}`, 'ap');
+			}
 		}
 
 		option = page.step(_(`
