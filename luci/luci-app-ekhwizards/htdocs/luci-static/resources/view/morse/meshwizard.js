@@ -35,6 +35,21 @@ function looksLikeMeshCapableRadio(wifiDevice, iwinfo) {
 	return /\bax\b/.test(infoText);
 }
 
+function meshBackhaulPreference(wifiDevice) {
+	// Range-first default: prefer 2.4 GHz, then 5 GHz, then 6 GHz.
+	// Unknown bands are least preferred.
+	const band = (wifiDevice.band ?? '').toLowerCase();
+	if (band === '2g') {
+		return 0;
+	} else if (band === '5g') {
+		return 1;
+	} else if (band === '6g') {
+		return 2;
+	}
+
+	return 9;
+}
+
 return wizard.AbstractWizardView.extend({
 	__init__(/* ... */) {
 		return this.super('__init__', this.varargs(arguments, 1,
@@ -354,6 +369,8 @@ return wizard.AbstractWizardView.extend({
 		const wifiMeshCapabilities = {};
 		const defaultWifiRoles = {};
 		const wizardUsed = uci.get('luci', 'wizard', 'used') === '1';
+		const meshCapableDevices = [];
+		const existingMeshDevices = [];
 
 		for (const wifiDevice of wifiDevices) {
 			const runtimeIfname = wifiNetworksBySection[wifiDevice.apInterfaceName]?.getIfname()
@@ -366,10 +383,29 @@ return wizard.AbstractWizardView.extend({
 			const existingMode = uci.get('wireless', wifiDevice.apInterfaceName, 'mode');
 			wifiMeshCapabilities[wifiDevice.name] =
 				existingMode === 'mesh' || looksLikeMeshCapableRadio(wifiDevice, iwinfo);
+			if (wifiMeshCapabilities[wifiDevice.name]) {
+				meshCapableDevices.push(wifiDevice);
+			}
+			if (existingMode === 'mesh') {
+				existingMeshDevices.push(wifiDevice);
+			}
+		}
+
+		const preferredMeshDevice = !wizardUsed && existingMeshDevices.length === 0
+			? meshCapableDevices
+				.toSorted((a, b) =>
+					meshBackhaulPreference(a) - meshBackhaulPreference(b)
+					|| a.name.localeCompare(b.name))[0]
+			: null;
+
+		for (const wifiDevice of wifiDevices) {
+			const existingMode = uci.get('wireless', wifiDevice.apInterfaceName, 'mode');
 			if (existingMode === 'mesh') {
 				defaultWifiRoles[wifiDevice.name] = 'mesh';
+			} else if (!wizardUsed && preferredMeshDevice && wifiDevice.name === preferredMeshDevice.name) {
+				defaultWifiRoles[wifiDevice.name] = 'mesh';
 			} else {
-				defaultWifiRoles[wifiDevice.name] = (!wizardUsed && wifiMeshCapabilities[wifiDevice.name]) ? 'mesh' : 'ap';
+				defaultWifiRoles[wifiDevice.name] = 'ap';
 			}
 		}
 
