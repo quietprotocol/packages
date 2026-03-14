@@ -65,6 +65,7 @@ const callSystemBoard = rpc.declare({
 const callMorseModeQuery = rpc.declare({
 	object: 'morse-mode',
 	method: 'query',
+	reject: false,
 });
 
 const callSessionAccess = rpc.declare({
@@ -576,7 +577,7 @@ async function createUplinkCard(netIface, hasQRCode) {
 }
 
 function createModeCard(morseModeQuery, ethernetPorts) {
-	const morseMode = MORSE_MODES[morseModeQuery['morse_mode']] || _('Unknown');
+	const morseMode = MORSE_MODES[morseModeQuery?.['morse_mode'] ?? 'none'] || MORSE_MODES.none;
 	const diagramMini = E('morse-config-diagram');
 	diagramMini.updateFrom(uci, ethernetPorts);
 	const diagramMax = E('morse-config-diagram');
@@ -1197,7 +1198,7 @@ return view.extend({
 		const [boardinfo, builtinEthernetPorts, morseMode, dhcpLeases] = await Promise.all([
 			callSystemBoard(),
 			callGetBuiltinEthernetPorts(),
-			callMorseModeQuery(),
+			callMorseModeQuery().catch(() => ({ morse_mode: 'none' })),
 			callLuciDHCPLeases().then((result) => {
 				// Compress IPv6 and IPv4 so we can try to show in one table.
 				// Possibly ill-advised; some info loss.

@@ -15,6 +15,7 @@ return view.extend({
 			uci.load('mesh11sd').then(() => true).catch(() => false),
 			//uci.load('matter').then(() => true).catch(() => false),
 			uci.load('luci'),
+			uci.load('wireless').catch(() => null),
 		]);
 	},
 
@@ -35,6 +36,25 @@ return view.extend({
 	},
 
 	render([hasMesh11sd]) {
+		const hasMorse = uci.sections('wireless', 'wifi-device').some(s => s.type === 'morse');
+		if (!hasMorse) {
+			if (!this.noMorseRedirectScheduled) {
+				this.noMorseRedirectScheduled = true;
+				window.setTimeout(() => { window.location.href = L.url('admin', 'network', 'wireless'); }, 1500);
+			}
+
+			return E('div', { class: 'wizard-contents' }, [
+				E('h2', _('Wi-Fi Setup')),
+				E('p', _('No HaLow radio was detected. Redirecting to standard Wi-Fi configuration.')),
+				E('div', [
+					E('a', {
+						class: 'cbi-button cbi-button-action',
+						href: L.url('admin', 'network', 'wireless'),
+					}, _('Open Wireless Configuration')),
+				]),
+			]);
+		}
+
 		const cards = [];
 		if (hasMesh11sd) {
 			cards.push(this.card(
@@ -45,8 +65,16 @@ return view.extend({
 			));
 		}
 		return E('div', { class: 'wizard-contents' }, [
-			E('h2', 'Select a Wizard'),
-			E('div', { class: 'cards' }, cards),
+			E('h2', _('Select a Wizard')),
+			cards.length > 0
+				? E('div', { class: 'cards' }, cards)
+				: E('div', [
+					E('p', _('No HaLow wizard options are currently available.')),
+					E('a', {
+						class: 'cbi-button cbi-button-action',
+						href: L.url('admin', 'network', 'wireless'),
+					}, _('Open Wireless Configuration')),
+				]),
 		]);
 	},
 

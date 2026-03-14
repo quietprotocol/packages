@@ -54,7 +54,7 @@ return view.extend({
 
 		return Promise.all([
 			callGetTimezones(),
-			halow.loadChannelMap(),
+			halow.loadChannelMap().catch(() => null),
 			uci.load('luci'),
 			uci.load('wireless').catch(() => null),
 		]);
@@ -71,7 +71,7 @@ return view.extend({
 	async handleApply(_ev) {
 		const mapEls = document.getElementById('maincontent').querySelectorAll('.cbi-map');
 		const maps = Array.from(mapEls).map(mapEl => dom.findClassInstance(mapEl));
-		const morseDeviceName = uci.sections('wireless', 'wifi-device').find(s => s.type === 'morse')['.name'];
+		const morseDeviceName = uci.sections('wireless', 'wifi-device').find(s => s.type === 'morse')?.['.name'];
 		const wifiDevices = uci.sections('wireless', 'wifi-device').filter(s => s.type === 'mac80211');
 
 		try {
@@ -86,8 +86,10 @@ return view.extend({
 				uci.unset('wireless', wifiDevice['.name'], 'disabled');
 			}
 
-			// Make sure our first HaLow device is enabled.
-			uci.unset('wireless', morseDeviceName, 'disabled');
+			// Make sure our first HaLow device is enabled (when present).
+			if (morseDeviceName) {
+				uci.unset('wireless', morseDeviceName, 'disabled');
+			}
 
 			// Update TZ based on browser TZ if we're on UTC.
 			if (uci.get('system', '@system[0]', 'timezone') === 'UTC') {
@@ -100,9 +102,9 @@ return view.extend({
 			}
 
 			// If this was the homepage, we've completed it, so now set the
-			// actual wizard as the homepage.
+			// actual wizard as the homepage (for HaLow-capable devices).
 			if (uci.get('luci', 'main', 'homepage') === L.env.requestpath.join('/')) {
-				uci.set('luci', 'main', 'homepage', 'admin/selectwizard');
+				uci.set('luci', 'main', 'homepage', morseDeviceName ? 'admin/selectwizard' : null);
 			}
 
 			const tasks = [];
@@ -118,7 +120,9 @@ return view.extend({
 			await Promise.all(tasks);
 
 			document.addEventListener('uci-applied', () => {
-				window.location.href = L.url('admin', 'selectwizard');
+				window.location.href = morseDeviceName
+					? L.url('admin', 'selectwizard')
+					: L.url('admin', 'network', 'wireless');
 				// A standard save triggers uci-applied then redirects
 				// back to the same page after apply_display seconds. However,
 				// we need to make sure _our_ redirect sticks before this happens,
@@ -146,39 +150,42 @@ return view.extend({
 		this.timezones = timezones;
 
 		const morseDevice = uci.sections('wireless', 'wifi-device').find(s => s.type === 'morse');
-		if (!morseDevice) {
-			// If there's no morse device detected at all, we can't do anything useful in the wizard,
-			// so just drop to the standard homepage.
-			this.abort();
-		}
+		const hasMorse = !!morseDevice;
 
 		const wirelessMap = new form.Map(
 			'wireless',
 		);
-		let section = wirelessMap.section(
-			form.NamedSection, morseDevice['.name'], 'wifi-device',
-			_('HaLow Configuration'),
-		);
+		let section;
+		let option;
 
-		let option = section.option(form.ListValue, 'country', _('Country'),
-			_(`The country determines the capabilities of your HaLow network.
-				<strong>Warning:</strong> If you are currently using HaLow, modifying this value
-				may cause you to lose access to this device.
-				For details, see the <a href="%s" target="_blank">regulatory data table</a>.`).format(L.url('admin', 'help', 'regulatoryinfo')),
-		);
-		option.default = DEFAULT_COUNTRY;
-		option.rmempty = false;
-		for (const countryCode of Object.keys(channelMap)) {
-			option.value(countryCode, countryCode);
+		if (hasMorse) {
+			section = wirelessMap.section(
+				form.NamedSection, morseDevice['.name'], 'wifi-device',
+				_('HaLow Configuration'),
+			);
+
+			option = section.option(form.ListValue, 'country', _('Country'),
+				_(`The country determines the capabilities of your HaLow network.
+					<strong>Warning:</strong> If you are currently using HaLow, modifying this value
+					may cause you to lose access to this device.
+					For details, see the <a href="%s" target="_blank">regulatory data table</a>.`).format(L.url('admin', 'help', 'regulatoryinfo')),
+			);
+			option.default = DEFAULT_COUNTRY;
+			option.rmempty = false;
+			for (const countryCode of Object.keys(channelMap || {})) {
+				option.value(countryCode, countryCode);
+			}
+			option.write = function (sectionId, value) {
+				this.super('write', [sectionId, value]);
+
+				// Set channel appropriately if the country was mutated
+				// so we're less likely to leave this in a broken state.
+				const bestChannel = Object.values(channelMap?.[value] || {}).reduce((a, b) => Number(a.bw) > Number(b.bw) ? a : b, null);
+				if (bestChannel) {
+					uci.set('wireless', morseDevice['.name'], 'channel', bestChannel['s1g_chan']);
+				}
+			};
 		}
-		option.write = function (sectionId, value) {
-			this.super('write', [sectionId, value]);
-
-			// Set channel appropriately if the country was mutated
-			// so we're less likely to leave this in a broken state.
-			const bestChannel = Object.values(channelMap[value]).reduce((a, b) => Number(a.bw) > Number(b.bw) ? a : b);
-			uci.set('wireless', morseDevice['.name'], 'channel', bestChannel['s1g_chan']);
-		};
 
 		const systemMap = new form.Map('system');
 		section = systemMap.section(form.TypedSection, 'system', _('System Configuration'));
@@ -211,7 +218,9 @@ return view.extend({
 			.then(([wirelessHtml, systemHtml, passwordHtml]) => E('div', { class: 'wizard-contents' }, [
 				E('div', { class: 'cbi-section' }, [
 					E('h1', _('Welcome!')),
-					E('p', _(`This wizard will guide you through the initial setup of this device.`)),
+					E('p', hasMorse
+						? _(`This wizard will guide you through the initial setup of this device.`)
+						: _(`No HaLow radio was detected. This wizard will configure system settings and enable standard Wi-Fi radios.`)),
 					E('p', _(`You can exit now if you'd prefer to configure manually.`)),
 				]),
 				wirelessHtml,
