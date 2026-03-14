@@ -162,7 +162,7 @@ return wizard.AbstractWizardView.extend({
 		// Extract values then remove from dummy uci section.
 		const device_mode_meshgate = uci.get('network', 'wizard', 'device_mode_meshgate');
 		const device_mode_meshpoint = uci.get('network', 'wizard', 'device_mode_meshpoint');
-		const uplink = uci.get('network', 'wizard', 'uplink');
+		let uplink = uci.get('network', 'wizard', 'uplink');
 
 		let isMeshGate = uci.get('mesh11sd', 'mesh_params', 'mesh_gate_announcements') === '1';
 		let isMeshAp = uci.get('wireless', morseMeshApInterfaceName, 'disabled') !== '1';
@@ -189,6 +189,19 @@ return wizard.AbstractWizardView.extend({
 				uci.unset('wireless', wifiDevice.apInterfaceName, 'wds');
 			} else {
 				uci.set('wireless', wifiDevice.apInterfaceName, 'mode', 'ap');
+			}
+		}
+
+		// Guard against stale conflicting state: mesh-role radios cannot also be Wi-Fi uplink.
+		if (uplink?.startsWith('wifi-')) {
+			const uplinkSta = uplink.slice('wifi-'.length);
+			const uplinkDevice = wifiDevices.find(d => d.staInterfaceName === uplinkSta);
+			if (uplinkDevice) {
+				const role = uci.get('network', 'wizard', `wifi_role_${uplinkDevice.name}`) || 'ap';
+				if (role === 'mesh' && this.wifiMeshCapabilities?.[uplinkDevice.name]) {
+					uplink = 'none';
+					uci.set('network', 'wizard', 'uplink', uplink);
+				}
 			}
 		}
 
@@ -643,6 +656,19 @@ return wizard.AbstractWizardView.extend({
 				: `${wifiDevice.getBandName()} Wi-Fi`;
 			option.value(`wifi-${wifiDevice.staInterfaceName}`, displayName);
 		}
+		option.validate = function (_sectionId, value) {
+			if (value?.startsWith('wifi-')) {
+				const staIfaceName = value.slice('wifi-'.length);
+				const selectedWifiDevice = wifiDevices.find(d => d.staInterfaceName === staIfaceName);
+				if (selectedWifiDevice) {
+					const role = uci.get('network', 'wizard', `wifi_role_${selectedWifiDevice.name}`) || 'ap';
+					if (role === 'mesh' && wifiMeshCapabilities?.[selectedWifiDevice.name]) {
+						return _('Selected Wi-Fi radio is configured as Mesh Point. Choose another uplink, or switch that radio role to Access Point.');
+					}
+				}
+			}
+			return true;
+		};
 		option.onchange = function (ev, sectionId, value) {
 			if (value.includes('ethernet')) {
 				this.page.updateInfoText(ethInfoAp, thisWizardView);
@@ -658,6 +684,9 @@ return wizard.AbstractWizardView.extend({
 			option = page.option(morseui.SSIDListScan, `uplink_ssid-${wifiDevice.staInterfaceName}`, _('<abbr title="Service Set Identifier">SSID</abbr>'));
 			// Have to be explicit here because we change uciconfig/section/option.
 			option.depends('network.wizard.uplink', `wifi-${wifiDevice.staInterfaceName}`);
+			if (wifiMeshCapabilities?.[wifiDevice.name]) {
+				option.depends(`network.wizard.wifi_role_${wifiDevice.name}`, 'ap');
+			}
 			option.uciconfig = 'wireless';
 			option.ucisection = wifiDevice.staInterfaceName;
 			option.ucioption = 'ssid';
@@ -680,6 +709,9 @@ return wizard.AbstractWizardView.extend({
 			option.ucisection = wifiDevice.staInterfaceName;
 			option.ucioption = 'encryption';
 			option.depends('network.wizard.uplink', `wifi-${wifiDevice.staInterfaceName}`);
+			if (wifiMeshCapabilities?.[wifiDevice.name]) {
+				option.depends(`network.wizard.wifi_role_${wifiDevice.name}`, 'ap');
+			}
 			option.value('psk2', _('WPA2-PSK'));
 			option.value('sae', _('WPA3-SAE'));
 			option.value('psk', _('WPA-PSK'));
@@ -691,6 +723,10 @@ return wizard.AbstractWizardView.extend({
 			option.depends(`wireless.wizard.uplink_encryption-${wifiDevice.staInterfaceName}`, 'psk');
 			option.depends(`wireless.wizard.uplink_encryption-${wifiDevice.staInterfaceName}`, 'psk2');
 			option.depends(`wireless.wizard.uplink_encryption-${wifiDevice.staInterfaceName}`, 'sae');
+			option.depends('network.wizard.uplink', `wifi-${wifiDevice.staInterfaceName}`);
+			if (wifiMeshCapabilities?.[wifiDevice.name]) {
+				option.depends(`network.wizard.wifi_role_${wifiDevice.name}`, 'ap');
+			}
 			option.uciconfig = 'wireless';
 			option.ucisection = wifiDevice.staInterfaceName;
 			option.ucioption = 'key';
