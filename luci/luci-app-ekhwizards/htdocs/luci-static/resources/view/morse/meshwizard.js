@@ -181,6 +181,7 @@ return wizard.AbstractWizardView.extend({
 
 		let isMeshGate = uci.get('mesh11sd', 'mesh_params', 'mesh_gate_announcements') === '1';
 		let isMeshAp = uci.get('wireless', morseMeshApInterfaceName, 'disabled') !== '1';
+		let nonHalowMeshIndex = 1;
 
 		const wifiApsEnabled = {};
 		for (const wifiDevice of wifiDevices) {
@@ -197,9 +198,10 @@ return wizard.AbstractWizardView.extend({
 
 			if (meshSelected) {
 				// Reuse this radio's default AP iface as a non-HaLow mesh member.
+				const nonHalowMeshNetwork = `batmesh${nonHalowMeshIndex++}`;
 				uci.unset('wireless', wifiDevice.apInterfaceName, 'disabled');
 				uci.set('wireless', wifiDevice.apInterfaceName, 'mode', 'mesh');
-				uci.set('wireless', wifiDevice.apInterfaceName, 'network', 'batmesh1');
+				uci.set('wireless', wifiDevice.apInterfaceName, 'network', nonHalowMeshNetwork);
 				uci.set('wireless', wifiDevice.apInterfaceName, 'encryption', 'sae');
 				uci.unset('wireless', wifiDevice.apInterfaceName, 'wds');
 			} else {

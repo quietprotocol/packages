@@ -475,23 +475,40 @@ function setupBatmanInterfaceOnDevice(deviceName = 'bat0') {
 
 	// See if there's already a default batman interface on this device
 	const batmanInterface = uci.sections('network', 'interface').find(s => s.proto === 'batadv_hardif' && s.master=== deviceName && s['.name'] === defaultBatmanIfaceName);
-	if (batmanInterface) {
-		return uci.get('network', defaultBatmanIfaceName, 'name');
+	if (!batmanInterface) {
+		// Create the default batman interface on the batman device
+		uci.add('network', 'interface', defaultBatmanIfaceName);
+		uci.set('network', defaultBatmanIfaceName, 'proto', 'batadv_hardif');
+		uci.set('network', defaultBatmanIfaceName, 'master', deviceName);
 	}
 
-	// Create the default batman interface on the batman device
-	uci.add('network', 'interface', defaultBatmanIfaceName);
-	uci.set('network', defaultBatmanIfaceName, 'proto', 'batadv_hardif');
-	uci.set('network', defaultBatmanIfaceName, 'master', deviceName);
+	// Ensure non-HaLow mesh hardifs exist for any explicitly assigned
+	// batmeshX networks (e.g. batmesh1, batmesh2) from wizard flows.
+	const requiredNonHalowBatmanIfaces = new Set();
+	for (const wifiIface of uci.sections('wireless', 'wifi-iface')) {
+		if (wifiIface.mode !== 'mesh' || wifiIface.disabled === '1') {
+			continue;
+		}
 
-	// Create secondary batman interface on the batman device for 2.4ghz wifi
-	// Don't create if it already exists
-	const batmanSecondaryIfaceName = 'batmesh1';
-	const batmanSecondaryInterface = uci.sections('network', 'interface').find(s => s.proto === 'batadv_hardif' && s.master=== deviceName && s['.name'] === batmanSecondaryIfaceName);
-	if (!batmanSecondaryInterface) {
-		uci.add('network', 'interface', batmanSecondaryIfaceName);
-		uci.set('network', batmanSecondaryIfaceName, 'proto', 'batadv_hardif');
-		uci.set('network', batmanSecondaryIfaceName, 'master', deviceName);
+		const radioDevice = uci.get('wireless', wifiIface['.name'], 'device');
+		if (!radioDevice || radioDevice === morseDeviceName) {
+			continue;
+		}
+
+		const batmeshNetwork = uci.get('wireless', wifiIface['.name'], 'network');
+		if (typeof batmeshNetwork === 'string' && /^batmesh[1-9]\d*$/.test(batmeshNetwork)) {
+			requiredNonHalowBatmanIfaces.add(batmeshNetwork);
+		}
+	}
+
+	for (const batmanIfaceName of requiredNonHalowBatmanIfaces) {
+		const existingBatmanIface = uci.sections('network', 'interface').find(
+			s => s.proto === 'batadv_hardif' && s.master === deviceName && s['.name'] === batmanIfaceName);
+		if (!existingBatmanIface) {
+			uci.add('network', 'interface', batmanIfaceName);
+			uci.set('network', batmanIfaceName, 'proto', 'batadv_hardif');
+			uci.set('network', batmanIfaceName, 'master', deviceName);
+		}
 	}
 
 	// Loop through devices using uci.sections('network', 'device') and find the one with the name br-ahwlan
